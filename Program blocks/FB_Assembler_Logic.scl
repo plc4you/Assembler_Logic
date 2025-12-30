@@ -238,19 +238,24 @@ BEGIN
 	// Podtrzymanie sygnału Grab niezależnie od kroku, aby robot nie upuszczał części
 	#Grab := #stat_HoldingPart;
 	
-	// --- 6. RESET FLAG POMOCNICZYCH I TIMERÓW ---
-	// Reset flag i timerów przy zatrzymaniu systemu
-	IF NOT #System_Pracuje THEN
-	    #stat_Step := 0;
-	    #stat_HoldingPart := FALSE;
-	    
-	    #stat_X_Started := FALSE;  // Czyścimy pamięć ruchu X
-	    #stat_Z_Started := FALSE;  // Czyścimy pamięć ruchu Z
-	    
-	    // Reset timera, aby nie "wisiały" przy ponownym starcie
-	    #timerLift(IN := FALSE,
-	               PT := T#100ms);
-	END_IF;
-	
+// --- 6. RESET FLAG POMOCNICZYCH I TIMERÓW ---
+IF NOT #System_Pracuje THEN
+    #stat_Step := 0;
+    #stat_HoldingPart := FALSE;
+    
+    // KLUCZOWY RESET: Czyścimy pamięć wykrycia elementów
+    #stat_LidDone := FALSE;
+    #stat_BaseDone := FALSE;
+    
+    // Reset wyzwalaczy (instancji R_TRIG), aby nie pamiętały zbocza
+    #stat_TrigLid(CLK := FALSE);
+    #stat_TrigBase(CLK := FALSE);
+    
+    #stat_X_Started := FALSE;
+    #stat_Z_Started := FALSE;
+    
+    #timerLift(IN := FALSE,
+               PT := T#100ms);
+END_IF;
 END_FUNCTION_BLOCK
 
