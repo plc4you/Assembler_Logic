@@ -1,0 +1,256 @@
+﻿FUNCTION_BLOCK "FB_Assembler_Logic"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      "Moving X" : Bool;
+      "Moving Z" : Bool;
+      "Item detected" : Bool;
+      "Lid at place" : Bool;
+      "Lid clamped" : Bool;
+      "Pos. at limit (lids)" : Bool;
+      "Base at place" : Bool;
+      "Base clamped" : Bool;
+      "Pos. at limit (bases)" : Bool;
+      "Part leaving" : Bool;
+      Start : Bool;
+      Reset : Bool;
+      Stop : Bool;
+      "Emergency stop" : Bool;
+      Auto : Bool;
+      "FACTORY I/O (Uruchomiony)" : Bool;
+      "Reset Coutner" : Bool;
+   END_VAR
+
+   VAR_OUTPUT 
+      "Move X" : Bool;
+      "Move Z" : Bool;
+      Grab : Bool;
+      "Lids conveyor" : Bool;
+      "Clamp lid" : Bool;
+      "Pos. raise (lids)" : Bool;
+      "Bases conveyor" : Bool;
+      "Clamp base" : Bool;
+      "Pos. raise (bases)" : Bool;
+      "Start light" : Bool;
+      "Reset light" : Bool;
+      "Stop light" : Bool;
+      "Counter" : DInt;
+      "Reset Coutner Light" : Bool;
+   END_VAR
+
+   VAR 
+      stat_Step : Int;
+      stat_TrigLid {InstructionName := 'F_TRIG'; LibVersion := '1.0'; S7_SetPoint := 'False'} : F_TRIG;
+      stat_TrigBase {InstructionName := 'F_TRIG'; LibVersion := '1.0'} : F_TRIG;
+      stat_LidDone { S7_SetPoint := 'True'} : Bool;
+      stat_BaseDone : Bool;
+      timerLift {InstructionName := 'TON_TIME'; LibVersion := '1.0'; S7_SetPoint := 'False'} : TON_TIME;
+      stat_HoldingPart { S7_SetPoint := 'True'} : Bool;
+      stat_X_Started : Bool;
+      stat_Z_Started : Bool;
+      System_Pracuje : Bool;
+      Awaria_Aktywna : Bool;
+   END_VAR
+
+
+BEGIN
+	// --- 1. LOGIKA PAMIĘCI AWARII (LATCH) ---
+	// Jeśli wciśnięto E-Stop, ustawiamy stan awarii.
+	// Stan ten trwa nawet po wyciśnięciu E-Stop, aż do naciśnięcia Reset.
+	IF NOT #"Emergency stop" THEN
+	    #Awaria_Aktywna := TRUE;
+	END_IF;
+	
+	IF #Reset AND #"Emergency stop" THEN
+	   #Awaria_Aktywna := FALSE;  // Kasowanie awarii tylko gdy grzybek jest wyciśnięty 
+	END_IF;
+	
+	// --- 2. LOGIKA PRACY (START/STOP) ---
+	// System może pracować tylko gdy nie ma aktywnej awarii
+	IF #"Start" AND NOT #Awaria_Aktywna AND #"Stop" AND #"Emergency stop" THEN
+	    #System_Pracuje := TRUE;
+	ELSIF NOT #"Stop"  OR #Awaria_Aktywna THEN
+	    #System_Pracuje := FALSE;
+	END_IF;
+	
+	// --- 3. STEROWANIE LAMPKAMI ---
+	// Lampka RESET
+	IF #Awaria_Aktywna THEN
+	    #"Reset light" :="Clock_1Hz";  // Miga dopóki nie wciśniesz Reset
+	ELSE
+	    #"Reset light":= FALSE;
+	END_IF;
+	
+	// Lampka START (zielona)
+	IF #System_Pracuje THEN
+	    #"Start light" := TRUE;        // Pali się ciągle podczas pracy
+	ELSIF NOT #Awaria_Aktywna AND #"Emergency stop" AND #Stop THEN
+	    #"Start light" := "Clock_1Hz";  // Miga po Resecie (gotowość do Startu)
+	ELSE
+	    #"Start light" := FALSE;       // Ciemna podczas awarii
+	END_IF;
+	
+	// Lampka STOP (czerwona)
+	IF NOT #System_Pracuje THEN
+	    #"Stop light" := TRUE;
+	ELSE
+	    #"Stop light" := FALSE;
+	END_IF;
+	// Reset Coutnera
+	IF #"Reset Coutner" THEN
+	    #"Reset Coutner Light" := TRUE;
+	    #"Counter" := 0;
+	ELSE
+	    #"Reset Coutner Light" := FALSE;
+	END_IF;
+	    
+	// --- 4. AUTOMAT STANÓW (GŁÓWNY PROCES) ---
+	// Sterowanie procesem tylko gdy system pracuje
+	IF #System_Pracuje THEN
+	    CASE #stat_Step OF
+	            
+	        0:  // TRANSPORT ELEMENTÓW ZA CZUJNIKI (NC + R_TRIG)
+	            #stat_TrigLid(CLK := #"Lid at place");
+	            #stat_TrigBase(CLK := #"Base at place");
+	            
+	            // Jeśli element mija czujnik NC (powrót sygnału na 1), zatrzymaj taśmę
+	            IF #stat_TrigLid.Q THEN
+	                #stat_LidDone := TRUE;
+	            END_IF;
+	            IF #stat_TrigBase.Q THEN
+	                #stat_BaseDone := TRUE;
+	            END_IF;
+	            
+	            #"Lids conveyor" := NOT #stat_LidDone;
+	            #"Bases conveyor" := NOT #stat_BaseDone;
+	            
+	            IF #stat_LidDone AND #stat_BaseDone THEN
+	                #stat_LidDone := FALSE;
+	                #stat_BaseDone := FALSE;
+	                #stat_Step := 10;
+	            END_IF;
+	            
+	        10: // ZACISKANIE (Zaciski NC: zaciśnięte = FALSE)
+	            #"Clamp lid" := TRUE;
+	            #"Clamp base" := TRUE;
+	            IF NOT #"Lid clamped" AND NOT #"Base clamped" THEN
+	                #stat_Step := 20;
+	            END_IF;
+	            
+	        20: // MOVE Z (Zjazd w dół po pokrywę)
+	            #"Move Z" := TRUE;
+	            IF NOT #"Moving Z" AND #"Item detected" THEN
+	                #stat_Step := 30;
+	            END_IF;
+	            
+	        30: // GRAB & PODNIESIENIE (Zjazd Z w górę)
+	            #stat_HoldingPart := TRUE;  // Chwytak ON (podtrzymany globalnie)
+	            #"Move Z" := FALSE;            // Komenda: Jedź w górę
+	            #"Clamp lid" := FALSE;         // Puść zacisk pokrywy
+	            
+	            // Czekaj aż ramię dotrze na górę i ustabilizuje element
+	            #timerLift(IN := (NOT #"Moving Z" AND #"Item detected"),
+	                       PT := T#100ms);
+	            
+	            IF #timerLift.Q THEN
+	                #stat_Step := 40;
+	            END_IF;
+	            
+	        40: // MOVE X (Przejazd w osi X nad podstawę)
+	            #timerLift(IN := FALSE,
+	                       PT := T#100ms); // Reset timera z poprzedniego kroku
+	            
+	            #"Move X" := TRUE; // Uruchomienie ruchu
+	            
+	            // LOGIKA PRZEJŚCIA:
+	            // Musimy mieć pewność, że ruch wystartował (Moving X = TRUE)
+	            // a następnie zakończył się (Moving X = FALSE)
+	            IF #"Move X" AND NOT #"Moving X" AND #stat_X_Started THEN
+	                #stat_X_Started := FALSE; // Reset flagi pomocniczej
+	                #stat_Step := 50;
+	            END_IF;
+	            
+	            // Flaga pomocnicza wykrywająca, że ramię ruszyło
+	            IF #"Moving X" THEN
+	                #stat_X_Started := TRUE;
+	            END_IF;
+	            
+	        50: // MOVE Z (Opuszczenie pokrywy na podstawę)
+	            #"Move Z":= TRUE;
+	            
+	            // Czekaj na koniec ruchu osi Z w dół
+	            IF #"Move Z" AND NOT #"Moving Z" AND #stat_Z_Started THEN
+	                #stat_Z_Started := FALSE;
+	                #stat_Step := 60;
+	            END_IF;
+	            IF #"Moving Z" THEN
+	                #stat_Z_Started := TRUE;
+	            END_IF;
+	            
+	        60: // GRAB OFF (Puszczenie elementu)
+	            #stat_HoldingPart := FALSE; // Chwytak OFF
+	            #"Move Z" := FALSE;
+	            
+	            // Czekaj aż czujnik potwierdzi, że element odpadł od chwytaka
+	            IF NOT #"Item detected" THEN
+	                #stat_Step := 70;
+	            END_IF;
+	            
+	        70: // POWRÓT RAMIENIA I WYPUŚCZENIE PRODUKTU
+	            #"Move Z" := FALSE;
+	            #"Move X" := FALSE;
+	            #"Clamp base" := FALSE; // Puść gotowy produkt
+	            
+	            // 1. Czekaj na powrót ramienia, aby bezpiecznie podnieść transporter
+	            IF NOT #"Moving X" AND NOT #"Moving Z" THEN
+	                #"Pos. raise (bases)" := TRUE;
+	                #"Bases conveyor":= TRUE;
+	            END_IF;
+	            
+	            // 2. Gdy produkt zacznie opuszczać stację (wejście na czujnik Part leaving)
+	            IF #"Part leaving" THEN
+	                #"Pos. raise (bases)" := FALSE; // Opuść blokadę
+	                #Counter := #Counter + 1;   // Naliczenie sztuki
+	                #stat_Step := 80;           // Przejdź do kroku oczekiwania na odjazd
+	            END_IF;
+	            
+	        80: // OCZEKIWANIE NA CAŁKOWITY ODJAZD (Stabilizacja licznika)
+	            // Czekamy, aż produkt całkowicie zniknie z czujnika (dla NC sygnał wróci na TRUE)
+	            // Zapobiega to wielokrotnemu naliczeniu tej samej sztuki
+	            IF #"Part leaving"THEN
+	                #stat_Step := 0;
+	            END_IF;
+	            
+	    END_CASE;
+	    
+	ELSE
+	    // Awaryjne wyłączenie wszystkich napędów
+	    #"Lids conveyor" := FALSE;
+	    #"Bases conveyor" := FALSE;
+	    #"Move X":= FALSE;
+	    #"Move Z":= FALSE;
+	    #"Clamp lid":= FALSE;
+	    #"Clamp base" := FALSE;
+	    #stat_HoldingPart := FALSE;
+	END_IF;
+	
+	// --- 5. PODTRZYMANIE SYGNAŁU CHWYTAKA ---
+	// Podtrzymanie sygnału Grab niezależnie od kroku, aby robot nie upuszczał części
+	#Grab := #stat_HoldingPart;
+	
+	// --- 6. RESET FLAG POMOCNICZYCH I TIMERÓW ---
+	// Reset flag i timerów przy zatrzymaniu systemu
+	IF NOT #System_Pracuje THEN
+	    #stat_Step := 0;
+	    #stat_HoldingPart := FALSE;
+	    
+	    #stat_X_Started := FALSE;  // Czyścimy pamięć ruchu X
+	    #stat_Z_Started := FALSE;  // Czyścimy pamięć ruchu Z
+	    
+	    // Reset timera, aby nie "wisiały" przy ponownym starcie
+	    #timerLift(IN := FALSE,
+	               PT := T#100ms);
+	END_IF;
+	
+END_FUNCTION_BLOCK
+
